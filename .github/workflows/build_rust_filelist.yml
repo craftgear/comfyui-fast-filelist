@@ -1,0 +1,121 @@
+name: Build rust-filelist binaries
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "custom_nodes/comfyui-rust-filelist/**"
+      - "custom_nodes/comfyui-rust-filelist/.github/workflows/build_rust_filelist.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-14
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install maturin
+        run: python -m pip install -U pip maturin
+      - name: Build wheel
+        run: >
+          maturin build
+          --release
+          --manifest-path custom_nodes/comfyui-rust-filelist/rust/Cargo.toml
+          --out custom_nodes/comfyui-rust-filelist/dist
+      - name: Extract extension
+        shell: python
+        run: |
+          import glob
+          import os
+          import shutil
+          import zipfile
+
+          dist_dir = "custom_nodes/comfyui-rust-filelist/dist"
+          wheels = glob.glob(os.path.join(dist_dir, "*.whl"))
+          if not wheels:
+            raise SystemExit("No wheel files found")
+
+          wheel_path = wheels[0]
+          with zipfile.ZipFile(wheel_path) as zf:
+            candidates = [
+              name for name in zf.namelist()
+              if name.startswith("comfyui_rust_filelist")
+              and (
+                name.endswith(".so")
+                or name.endswith(".pyd")
+                or name.endswith(".dylib")
+              )
+            ]
+            if not candidates:
+              raise SystemExit("No extension file found in wheel")
+            os.makedirs("custom_nodes/comfyui-rust-filelist", exist_ok=True)
+            for name in candidates:
+              dest = os.path.join("custom_nodes/comfyui-rust-filelist", os.path.basename(name))
+              with zf.open(name) as src, open(dest, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-filelist-${{ matrix.os }}
+          path: custom_nodes/comfyui-rust-filelist/comfyui_rust_filelist*
+
+  commit:
+    if: github.actor != 'github-actions[bot]'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Merge artifacts
+        shell: python
+        run: |
+          import glob
+          import os
+          import shutil
+
+          target_dir = "custom_nodes/comfyui-rust-filelist"
+          os.makedirs(target_dir, exist_ok=True)
+
+          for pattern in (
+            "comfyui_rust_filelist*.so",
+            "comfyui_rust_filelist*.pyd",
+            "comfyui_rust_filelist*.dylib",
+          ):
+            for path in glob.glob(os.path.join(target_dir, pattern)):
+              os.remove(path)
+
+          for path in glob.glob("artifacts/**/comfyui_rust_filelist*", recursive=True):
+            dest = os.path.join(target_dir, os.path.basename(path))
+            shutil.copy2(path, dest)
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_nodes/comfyui-rust-filelist/comfyui_rust_filelist*
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Update rust-filelist binaries"
+          git push
